@@ -21,6 +21,7 @@ import {
   SEED_ACHIEVEMENTS,
   SEED_NOTIFICATIONS,
 } from '../data/seedData';
+import { fetchAllPRsFromDB, fetchUserPRsFromDB } from './api';
 
 const STORAGE_KEYS = {
   USERS: 'prarena_users_v1',
@@ -65,6 +66,7 @@ export class StorageService {
   private achievements: Achievement[];
   private notifications: Notification[];
   private follows: { followerId: string; followingId: string }[];
+  private prListeners: Set<() => void> = new Set();
 
   constructor() {
     this.users = loadFromStorage<User[]>(STORAGE_KEYS.USERS, SEED_USERS);
@@ -84,6 +86,26 @@ export class StorageService {
 
     // Initial save to sync
     this.persistAll();
+
+    // Background sync from PostgreSQL database
+    this.syncPRsFromBackend().catch((e) => console.warn('[Storage] Background PR sync warning:', e));
+  }
+
+  public subscribeToPRs(callback: () => void): () => void {
+    this.prListeners.add(callback);
+    return () => {
+      this.prListeners.delete(callback);
+    };
+  }
+
+  private notifyPRListeners() {
+    this.prListeners.forEach((cb) => {
+      try {
+        cb();
+      } catch (err) {
+        console.error('[Storage] Error in PR listener:', err);
+      }
+    });
   }
 
   private persistAll() {
@@ -295,6 +317,105 @@ export class StorageService {
     return this.prs
       .filter((p) => p.verificationStatus === 'PENDING')
       .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
+  }
+
+  /**
+   * Synchronize all PRs from backend PostgreSQL database
+   */
+  public async syncPRsFromBackend(): Promise<PRSubmission[]> {
+    try {
+      const dbPRs = await fetchAllPRsFromDB();
+      if (Array.isArray(dbPRs) && dbPRs.length > 0) {
+        for (const dbPR of dbPRs) {
+          this.mergeDBPR(dbPR);
+        }
+        this.persistAll();
+        this.notifyPRListeners();
+      }
+      return this.getPRs();
+    } catch (err) {
+      console.warn('[Storage] Could not sync PRs from backend:', err);
+      return this.getPRs();
+    }
+  }
+
+  /**
+   * Synchronize specific user's PRs from backend PostgreSQL database
+   */
+  public async syncUserPRsFromDB(userId: string): Promise<PRSubmission[]> {
+    try {
+      const dbPRs = await fetchUserPRsFromDB(userId);
+      if (Array.isArray(dbPRs) && dbPRs.length > 0) {
+        for (const dbPR of dbPRs) {
+          this.mergeDBPR(dbPR);
+        }
+        this.persistAll();
+        this.notifyPRListeners();
+      }
+      return this.getUserPRs(userId);
+    } catch (err) {
+      console.warn(`[Storage] Could not sync PRs for user ${userId} from backend:`, err);
+      return this.getUserPRs(userId);
+    }
+  }
+
+  /**
+   * Merges a database PR record into the local memory/storage cache
+   */
+  private mergeDBPR(dbPR: any): PRSubmission {
+    const user = this.getUserById(dbPR.userId);
+    const gymId = dbPR.gymId || user?.gymId || 'gym-1';
+    const gym = this.getGymById(gymId);
+
+    const formattedPR: PRSubmission = {
+      id: dbPR.id,
+      userId: dbPR.userId,
+      userName: user?.name || 'Athlete',
+      userUsername: user?.username || 'athlete',
+      userProfilePicture: user?.profilePicture || '',
+      gymId,
+      gymName: gym?.name || 'Affiliated Gym',
+      exercise: dbPR.exercise as ExerciseType,
+      weight: Number(dbPR.weight),
+      reps: Number(dbPR.reps),
+      unit: (dbPR.unit as 'kg' | 'lb') || 'kg',
+      videoUrl: dbPR.videoUrl, // Cloudinary permanent URL
+      thumbnailUrl:
+        dbPR.thumbnailUrl ||
+        dbPR.videoUrl?.replace(/\.[^/.]+$/, '.jpg') ||
+        'https://images.unsplash.com/photo-1517838277536-f5f99be501cd?q=80&w=600&auto=format&fit=crop',
+      verificationStatus: dbPR.verificationStatus || 'PENDING',
+      notes: dbPR.notes || undefined,
+      submittedAt:
+        typeof dbPR.submittedAt === 'string'
+          ? dbPR.submittedAt
+          : new Date(dbPR.submittedAt).toISOString(),
+      aiAssistedMetrics: {
+        formScore: 94,
+        depthConfidence: 95,
+        lockoutConfirmed: true,
+        tempoSeconds: 3.0,
+      },
+    };
+
+    const existingIndex = this.prs.findIndex((p) => p.id === formattedPR.id);
+    if (existingIndex >= 0) {
+      this.prs[existingIndex] = formattedPR;
+    } else {
+      this.prs.unshift(formattedPR);
+    }
+
+    return formattedPR;
+  }
+
+  /**
+   * Directly record a PR that was just returned from PostgreSQL/Prisma
+   */
+  public recordPersistedPR(dbPR: any): PRSubmission {
+    const pr = this.mergeDBPR(dbPR);
+    this.persistAll();
+    this.notifyPRListeners();
+    return pr;
   }
 
   public submitPR(submission: {

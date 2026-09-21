@@ -1,0 +1,32 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model PR {
+  id                 String    @id @default(cuid())
+  userId             String
+  exercise           String
+  weight             Float
+  reps               Int
+  unit               String    @default("kg")
+  videoUrl           String
+  thumbnailUrl       String?
+  gymId              String?
+  notes              String?
+  verificationStatus String    @default("PENDING")
+  isVerified         Boolean   @default(false)
+  verifiedAt         DateTime?
+  verifiedBy         String?
+  oneRepMaxKg        Float?
+  submittedAt        DateTime  @default(now())
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("prs")
+}

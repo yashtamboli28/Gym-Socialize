@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Compass,
   PlusCircle,
@@ -25,6 +25,11 @@ export const FeedPage: React.FC = () => {
   const [mediaType, setMediaType] = useState<'photo' | 'video'>('photo');
   const [linkedPRId, setLinkedPRId] = useState<string>('');
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+
+  useEffect(() => {
+    const unsub = storage.subscribeToPRs(() => setRefreshTrigger((r) => r + 1));
+    return () => unsub();
+  }, []);
 
   // Available PRs for current user to link to post
   const userPRs = currentUser ? storage.getUserPRs(currentUser.id) : [];

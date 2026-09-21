@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { X, Play, Pause, RotateCcw, ShieldCheck, AlertCircle, Check, Info } from 'lucide-react';
+import { X, Play, Pause, RotateCcw, ShieldCheck, AlertCircle, Check, Info, Cloud, ExternalLink } from 'lucide-react';
 import { PRSubmission } from '../../types';
 import { VerifiedBadge } from './VerifiedBadge';
 
@@ -214,6 +214,32 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               </div>
             </div>
           )}
+
+          {/* Permanent Video Storage Indicator */}
+          <div className="p-3 rounded-xl bg-neutral-950/70 border border-neutral-800 flex items-center justify-between text-xs text-neutral-300">
+            <div className="flex items-center gap-2">
+              <Cloud size={15} className="text-emerald-400 shrink-0" />
+              <span>
+                Storage:{' '}
+                {pr.videoUrl.includes('cloudinary.com') ? (
+                  <strong className="text-emerald-300">Cloudinary Permanent Storage</strong>
+                ) : (
+                  <span className="text-neutral-400">Persisted Video URL</span>
+                )}
+              </span>
+            </div>
+            {pr.videoUrl && (
+              <a
+                href={pr.videoUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[11px] text-emerald-400 hover:text-emerald-300 flex items-center gap-1 font-mono transition"
+              >
+                <span>Direct Link</span>
+                <ExternalLink size={12} />
+              </a>
+            )}
+          </div>
 
           {/* Verification Protocol Notice (Future AI Pipeline preview + Human Officiation) */}
           <div className="p-3 rounded-xl bg-neutral-950/50 border border-neutral-800 flex items-center justify-between text-xs text-neutral-400">

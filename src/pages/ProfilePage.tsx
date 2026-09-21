@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
   User as UserIcon,
@@ -36,11 +36,33 @@ export const ProfilePage: React.FC = () => {
   const [isEditingBio, setIsEditingBio] = useState(false);
   const [bioInput, setBioInput] = useState('');
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const [isSyncingPRs, setIsSyncingPRs] = useState(false);
 
   // Target user
   const profileUser = userId
     ? storage.getUserById(userId) || currentUser
     : currentUser;
+
+  // Sync user's PRs from PostgreSQL database on mount or profile change
+  useEffect(() => {
+    if (!profileUser?.id) return;
+
+    // 1. Subscribe to storage PR updates so UI refreshes automatically
+    const unsubscribe = storage.subscribeToPRs(() => {
+      setRefreshTrigger((prev) => prev + 1);
+    });
+
+    // 2. Fetch the user's PRs from backend / PostgreSQL to ensure permanent persistence
+    setIsSyncingPRs(true);
+    storage
+      .syncUserPRsFromDB(profileUser.id)
+      .catch((err) => console.warn('Could not sync user PRs from DB:', err))
+      .finally(() => setIsSyncingPRs(false));
+
+    return () => {
+      unsubscribe();
+    };
+  }, [profileUser?.id]);
 
   if (!profileUser) {
     return (

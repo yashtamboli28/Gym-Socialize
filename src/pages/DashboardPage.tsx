@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Flame,
@@ -22,6 +22,14 @@ import { CompetitionCard } from '../components/cards/CompetitionCard';
 
 export const DashboardPage: React.FC = () => {
   const { currentUser, logTodayWorkout } = useAuth();
+  const [, setRefresh] = useState(0);
+
+  useEffect(() => {
+    if (!currentUser?.id) return;
+    const unsubscribe = storage.subscribeToPRs(() => setRefresh((r) => r + 1));
+    storage.syncUserPRsFromDB(currentUser.id).catch((e) => console.warn(e));
+    return () => unsubscribe();
+  }, [currentUser?.id]);
 
   if (!currentUser) return null;
 

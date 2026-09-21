@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Dumbbell,
@@ -10,9 +10,13 @@ import {
   ArrowLeft,
   Info,
   ShieldAlert,
+  Cloud,
+  Database,
+  Loader2,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { storage } from '../services/storage';
+import { submitPRToBackend, checkConfigStatus } from '../services/api';
 import { ExerciseType, WeightUnit } from '../types';
 
 export const SubmitPRPage: React.FC = () => {
@@ -30,15 +34,34 @@ export const SubmitPRPage: React.FC = () => {
   const [gymId, setGymId] = useState<string>(currentUser?.gymId || 'gym-1');
   const [notes, setNotes] = useState<string>('');
 
-  // Video State
+  // Video State & Cloud Persistence
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [videoPreviewUrl, setVideoPreviewUrl] = useState<string>('');
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [submittedPRId, setSubmittedPRId] = useState<string>('');
   const [selectedDemoVideo, setSelectedDemoVideo] = useState<string>('');
+  const [errorMessage, setErrorMessage] = useState<string>('');
+  const [persistedVideoUrl, setPersistedVideoUrl] = useState<string>('');
+  const [persistedPRRecord, setPersistedPRRecord] = useState<any>(null);
+
+  // Cloudinary configuration status
+  const [cloudinaryConfigured, setCloudinaryConfigured] = useState<boolean | null>(null);
+  const [cloudName, setCloudName] = useState<string>('');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    checkConfigStatus()
+      .then((status) => {
+        setCloudinaryConfigured(status.cloudinaryConfigured);
+        if (status.cloudName) setCloudName(status.cloudName);
+      })
+      .catch((e) => {
+        console.warn('Could not verify Cloudinary config:', e);
+        setCloudinaryConfigured(false);
+      });
+  }, []);
 
   const EXERCISES: ExerciseType[] = [
     'Bench Press',
@@ -72,12 +95,13 @@ export const SubmitPRPage: React.FC = () => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Validation: 100MB limit and video formats
-    if (file.size > 100 * 1024 * 1024) {
-      alert('Video file size exceeds 100MB limit.');
+    // Validation: 150MB limit
+    if (file.size > 150 * 1024 * 1024) {
+      setErrorMessage('Video file size exceeds 150MB limit.');
       return;
     }
 
+    setErrorMessage('');
     setVideoFile(file);
     const objectUrl = URL.createObjectURL(file);
     setVideoPreviewUrl(objectUrl);
@@ -88,41 +112,56 @@ export const SubmitPRPage: React.FC = () => {
     setSelectedDemoVideo(item.url);
     setVideoPreviewUrl(item.url);
     setVideoFile(null);
+    setErrorMessage('');
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (!currentUser) return;
     setIsUploading(true);
+    setErrorMessage('');
+    setUploadProgress(10);
 
-    // Simulate Cloudinary/API upload progress
-    let prog = 0;
-    const interval = setInterval(() => {
-      prog += 25;
-      setUploadProgress(prog);
-      if (prog >= 100) {
-        clearInterval(interval);
-        setIsUploading(false);
-
-        // Submit to storage engine / backend
-        const pr = storage.submitPR({
+    try {
+      const isDemo = !!selectedDemoVideo;
+      
+      // Submit video and PR data to backend
+      // Required Architecture:
+      // Backend receives video -> uploads to Cloudinary -> Cloudinary returns secure_url ->
+      // Backend saves secure_url in PostgreSQL through Prisma -> Returns saved PR record
+      const result = await submitPRToBackend(
+        {
           userId: currentUser.id,
           exercise,
           weight: Number(weight),
           reps: Number(reps),
           unit,
-          videoUrl:
-            videoPreviewUrl ||
-            'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
-          thumbnailUrl:
-            'https://images.unsplash.com/photo-1534438327276-14e5300c3a48?q=80&w=600&auto=format&fit=crop',
-          notes,
+          videoFile: videoFile,
+          videoUrl: selectedDemoVideo || undefined,
           gymId,
-        });
+          notes,
+          isDemo,
+        },
+        (pct) => setUploadProgress(pct)
+      );
 
-        setSubmittedPRId(pr.id);
+      if (result.success && result.pr) {
+        // Save PR in client storage cache with the real Cloudinary videoUrl
+        const savedPR = storage.recordPersistedPR(result.pr);
+        setSubmittedPRId(savedPR.id);
+        setPersistedVideoUrl(result.pr.videoUrl || result.videoUrl);
+        setPersistedPRRecord(result.pr);
         setCurrentStep(4);
+      } else {
+        throw new Error('Server did not return a valid saved PR record.');
       }
-    }, 250);
+    } catch (err: any) {
+      console.error('[SubmitPRPage] Submission error:', err);
+      setErrorMessage(
+        err.message || 'Failed to upload video to Cloudinary or save record in PostgreSQL.'
+      );
+    } finally {
+      setIsUploading(false);
+    }
   };
 
   return (
@@ -341,12 +380,56 @@ export const SubmitPRPage: React.FC = () => {
       {/* Step 3: Upload Proof Video */}
       {currentStep === 3 && (
         <div className="bg-neutral-900/90 border border-neutral-800 rounded-3xl p-6 sm:p-8 space-y-6">
-          <div>
-            <h2 className="text-lg font-bold text-white mb-1">Upload Proof Video</h2>
-            <p className="text-xs text-neutral-400">
-              Upload a clear video showing the complete lift from setup to rerack.
-            </p>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <h2 className="text-lg font-bold text-white mb-1">Upload Proof Video</h2>
+              <p className="text-xs text-neutral-400">
+                Upload a clear video showing the complete lift from setup to rerack.
+              </p>
+            </div>
+
+            {/* Cloudinary Status Pill */}
+            {cloudinaryConfigured === true ? (
+              <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-semibold self-start">
+                <Cloud size={14} />
+                <span>Cloudinary Connected</span>
+                {cloudName && <span className="text-[10px] text-neutral-400">({cloudName})</span>}
+              </div>
+            ) : cloudinaryConfigured === false ? (
+              <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-semibold self-start">
+                <AlertCircle size={14} />
+                <span>Cloudinary Unconfigured</span>
+              </div>
+            ) : null}
           </div>
+
+          {/* Cloudinary Warning if not configured */}
+          {cloudinaryConfigured === false && (
+            <div className="p-4 rounded-2xl bg-amber-950/40 border border-amber-800/60 space-y-2 text-xs">
+              <div className="flex items-center gap-2 text-amber-400 font-semibold">
+                <AlertCircle size={16} />
+                <span>Cloudinary Credentials Missing</span>
+              </div>
+              <p className="text-neutral-300 text-[11px] leading-relaxed">
+                Cloudinary credentials (<code className="text-amber-300">CLOUDINARY_CLOUD_NAME</code>,{' '}
+                <code className="text-amber-300">CLOUDINARY_API_KEY</code>,{' '}
+                <code className="text-amber-300">CLOUDINARY_API_SECRET</code>) are not configured in environment secrets.
+                Direct file uploads require these credentials to generate permanent Cloudinary video URLs.
+                You may test the UI workflow with one of the pre-recorded <strong>DEMO ONLY</strong> videos below.
+              </p>
+            </div>
+          )}
+
+          {/* Error Message Box */}
+          {errorMessage && (
+            <div className="p-4 rounded-2xl bg-rose-950/60 border border-rose-800 text-xs space-y-1.5 animate-in fade-in">
+              <div className="flex items-center gap-2 text-rose-400 font-semibold">
+                <AlertCircle size={16} />
+                <span>Upload & Persistence Error</span>
+              </div>
+              <p className="text-rose-200 text-[11px] leading-relaxed">{errorMessage}</p>
+            </div>
+          )}
 
           {/* Verification Protocol Banner */}
           <div className="p-4 rounded-2xl bg-neutral-950 border border-neutral-800 space-y-2 text-xs">
@@ -358,14 +441,18 @@ export const SubmitPRPage: React.FC = () => {
               <li>Both lifter and barbell weights must remain in frame during the entire attempt.</li>
               <li>Camera angle must clearly show depth (Squat) or chest contact (Bench).</li>
               <li>No editing or cuts during the active movement.</li>
-              <li>Supported formats: MP4, MOV, WebM (Max 100MB).</li>
+              <li>Supported formats: MP4, MOV, WebM (Max 150MB).</li>
             </ul>
           </div>
 
           {/* Upload Area */}
           <div
             onClick={() => fileInputRef.current?.click()}
-            className="border-2 border-dashed border-neutral-700 hover:border-emerald-500 rounded-2xl p-8 text-center bg-neutral-950/60 cursor-pointer transition group"
+            className={`border-2 border-dashed rounded-2xl p-8 text-center bg-neutral-950/60 cursor-pointer transition group ${
+              videoFile
+                ? 'border-emerald-500/80 bg-emerald-950/10'
+                : 'border-neutral-700 hover:border-emerald-500'
+            }`}
           >
             <input
               type="file"
@@ -380,39 +467,62 @@ export const SubmitPRPage: React.FC = () => {
             <p className="text-sm font-semibold text-white mb-1">
               {videoFile ? videoFile.name : 'Click to select or drag video file here'}
             </p>
-            <p className="text-xs text-neutral-500">MP4, WebM, or MOV up to 100MB</p>
+            <p className="text-xs text-neutral-500">
+              {videoFile
+                ? `${(videoFile.size / (1024 * 1024)).toFixed(1)} MB selected • Will be uploaded directly to Cloudinary`
+                : 'MP4, WebM, or MOV up to 150MB'}
+            </p>
           </div>
 
           {/* Preset Demo Videos for Immediate Verification Testing */}
           <div className="pt-2">
-            <span className="text-xs font-semibold text-neutral-400 block mb-2">
-              Or pick a pre-recorded demo lift for instant prototype testing:
-            </span>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-semibold text-neutral-400">
+                Or pick a pre-recorded demo lift:
+              </span>
+              <span className="text-[10px] uppercase font-bold tracking-wider text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">
+                Demo Only — Not Permanent
+              </span>
+            </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               {DEMO_PROOF_VIDEOS.map((item) => (
                 <button
                   key={item.title}
                   type="button"
                   onClick={() => handleSelectDemoVideo(item)}
-                  className={`p-2.5 rounded-xl border text-left transition text-xs flex items-center gap-2.5 ${
+                  className={`p-2.5 rounded-xl border text-left transition text-xs flex flex-col gap-1.5 ${
                     selectedDemoVideo === item.url
-                      ? 'bg-emerald-500/15 border-emerald-500 text-emerald-300'
+                      ? 'bg-amber-500/15 border-amber-500 text-amber-300'
                       : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:text-white'
                   }`}
                 >
-                  <FileVideo size={16} className="shrink-0 text-neutral-400" />
-                  <span className="truncate">{item.title}</span>
+                  <div className="flex items-center gap-2">
+                    <FileVideo size={16} className="shrink-0 text-amber-400" />
+                    <span className="truncate font-semibold">{item.title}</span>
+                  </div>
+                  <span className="text-[10px] text-amber-400/80 font-mono">[DEMO ONLY]</span>
                 </button>
               ))}
             </div>
+
+            {selectedDemoVideo && (
+              <p className="text-[11px] text-amber-300 mt-2 bg-amber-950/30 p-2.5 rounded-xl border border-amber-900/50">
+                ℹ️ <strong>Demo Mode Selected:</strong> This uses a sample clip for demonstration purposes and is clearly marked as DEMO.
+              </p>
+            )}
           </div>
 
           {/* Video Preview if selected */}
           {videoPreviewUrl && (
             <div className="p-3 bg-neutral-950 rounded-xl border border-neutral-800">
-              <span className="text-xs font-semibold text-neutral-400 block mb-2">
-                Video Preview:
-              </span>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-semibold text-neutral-400">
+                  Local Video Preview:
+                </span>
+                <span className="text-[10px] text-neutral-500">
+                  {videoFile ? 'Local file selected' : 'Sample video selected'}
+                </span>
+              </div>
               <video
                 src={videoPreviewUrl}
                 controls
@@ -423,10 +533,13 @@ export const SubmitPRPage: React.FC = () => {
 
           {/* Progress bar if uploading */}
           {isUploading && (
-            <div className="space-y-2">
-              <div className="flex justify-between text-xs text-neutral-400">
-                <span>Transmitting video proof to storage...</span>
-                <span className="font-semibold text-emerald-400">{uploadProgress}%</span>
+            <div className="space-y-2 p-4 rounded-2xl bg-neutral-950 border border-neutral-800">
+              <div className="flex justify-between text-xs text-neutral-300">
+                <span className="flex items-center gap-2">
+                  <Loader2 size={14} className="animate-spin text-emerald-400" />
+                  <span>Uploading to Cloudinary & saving to PostgreSQL...</span>
+                </span>
+                <span className="font-semibold text-emerald-400 font-mono">{uploadProgress}%</span>
               </div>
               <div className="w-full h-2 rounded-full bg-neutral-800 overflow-hidden">
                 <div
@@ -434,23 +547,36 @@ export const SubmitPRPage: React.FC = () => {
                   style={{ width: `${uploadProgress}%` }}
                 />
               </div>
+              <p className="text-[10px] text-neutral-500">
+                Cloudinary is processing video encoding and Prisma is persisting the record with permanent URL.
+              </p>
             </div>
           )}
 
           <div className="pt-4 flex items-center justify-between">
             <button
               onClick={() => setCurrentStep(2)}
-              className="px-4 py-2 text-xs text-neutral-400 hover:text-white"
+              disabled={isUploading}
+              className="px-4 py-2 text-xs text-neutral-400 hover:text-white disabled:opacity-50"
             >
               ← Back
             </button>
             <button
-              disabled={!videoPreviewUrl || isUploading}
+              disabled={(!videoFile && !selectedDemoVideo) || isUploading}
               onClick={handleSubmit}
-              className="px-6 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:bg-neutral-800 text-neutral-950 disabled:text-neutral-500 font-bold text-sm transition flex items-center gap-2"
+              className="px-6 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:bg-neutral-800 text-neutral-950 disabled:text-neutral-500 font-bold text-sm transition flex items-center gap-2 shadow-lg"
             >
-              <Upload size={16} />
-              <span>Submit for Verification</span>
+              {isUploading ? (
+                <>
+                  <Loader2 size={16} className="animate-spin" />
+                  <span>Uploading & Persisting...</span>
+                </>
+              ) : (
+                <>
+                  <Upload size={16} />
+                  <span>Submit for Verification</span>
+                </>
+              )}
             </button>
           </div>
         </div>
@@ -459,21 +585,52 @@ export const SubmitPRPage: React.FC = () => {
       {/* Step 4: Submitted & Pending Verification */}
       {currentStep === 4 && (
         <div className="bg-neutral-900/90 border border-neutral-800 rounded-3xl p-8 sm:p-12 text-center space-y-6 animate-in fade-in">
-          <div className="w-16 h-16 rounded-3xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center mx-auto text-amber-400 shadow-xl">
-            <Clock size={32} />
+          <div className="w-16 h-16 rounded-3xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center mx-auto text-emerald-400 shadow-xl">
+            <CheckCircle2 size={32} />
           </div>
 
           <div>
-            <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 mb-3">
-              STATUS: PENDING VERIFICATION
-            </span>
+            <div className="flex items-center justify-center gap-2 mb-3">
+              <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                STATUS: PENDING VERIFICATION
+              </span>
+              <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                <Database size={12} />
+                <span>PERSISTED IN POSTGRESQL</span>
+              </span>
+            </div>
             <h2 className="text-2xl font-extrabold text-white">
-              Your PR Has Been Submitted!
+              PR & Proof Video Successfully Saved!
             </h2>
             <p className="text-sm text-neutral-300 max-w-md mx-auto mt-2 leading-relaxed">
-              Your lift is waiting in the officiating queue. An authorized referee will review your lockout, depth, and plate weights.
+              Your lift and video proof are permanently stored in the database. When you reload or view your profile, this video remains permanently accessible.
             </p>
           </div>
+
+          {/* Persisted Video Player */}
+          {persistedVideoUrl && (
+            <div className="max-w-md mx-auto bg-neutral-950 p-4 rounded-2xl border border-neutral-800 space-y-2 text-left">
+              <div className="flex items-center justify-between text-xs text-neutral-400 mb-1">
+                <span className="font-semibold text-white flex items-center gap-1.5">
+                  <Cloud size={14} className="text-emerald-400" />
+                  Stored Video Proof
+                </span>
+                <span className="text-[10px] font-mono text-neutral-500 truncate max-w-[160px]">
+                  {persistedVideoUrl.includes('cloudinary') ? 'Cloudinary Hosted' : 'Permanent Video'}
+                </span>
+              </div>
+              <video
+                src={persistedVideoUrl}
+                controls
+                className="w-full max-h-52 rounded-xl bg-black object-contain"
+              />
+              <div className="pt-1">
+                <span className="text-[10px] text-neutral-500 block truncate">
+                  URL: {persistedVideoUrl}
+                </span>
+              </div>
+            </div>
+          )}
 
           <div className="bg-neutral-950/80 max-w-md mx-auto p-4 rounded-2xl border border-neutral-800 text-xs space-y-2 text-left">
             <div className="flex justify-between">
@@ -487,6 +644,10 @@ export const SubmitPRPage: React.FC = () => {
               </span>
             </div>
             <div className="flex justify-between">
+              <span className="text-neutral-400">Database Record ID:</span>
+              <span className="font-mono text-neutral-300 text-[11px]">{submittedPRId}</span>
+            </div>
+            <div className="flex justify-between">
               <span className="text-neutral-400">Assigned Officiation Queue:</span>
               <span className="text-neutral-300">National Referee Desk</span>
             </div>
@@ -494,16 +655,16 @@ export const SubmitPRPage: React.FC = () => {
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
             <button
+              onClick={() => navigate(`/profile/${currentUser?.id}`)}
+              className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold text-xs transition"
+            >
+              View My PRs on Profile →
+            </button>
+            <button
               onClick={() => navigate('/admin')}
               className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 font-bold text-xs border border-amber-500/40 transition"
             >
-              Open Verifier Panel (Test Approval) →
-            </button>
-            <button
-              onClick={() => navigate(`/profile/${currentUser?.id}`)}
-              className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-white font-semibold text-xs transition"
-            >
-              View My Profile
+              Open Verifier Panel
             </button>
           </div>
         </div>
