@@ -1,0 +1,6 @@
+{
+  "name": "PR Arena",
+  "description": "Social fitness platform focused on verified gym performance, personal records, competitions, and gym communities.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
